@@ -1,0 +1,312 @@
+specification {
+  element actor {
+    style {
+      shape person
+    }
+  }
+  element platform
+  element service
+  element component
+  element function
+  element database
+  element storage
+}
+
+model {
+  // ── Actors ──
+  worker = actor 'Frontline Worker' {
+    description 'Uses the assistant hands-free from a phone browser: speaks, types, and uploads photos.'
+    style {
+      shape person
+      color green
+    }
+  }
+
+  supervisor = actor 'Supervisor' {
+    description 'Receives an outbound phone call when a case is escalated.'
+    style {
+      shape person
+      color red
+    }
+  }
+
+  // ── Web Application (AWS App Runner) ──
+  webapp = platform 'Web Application' {
+    description 'Containerized Node.js app hosted on AWS App Runner with automatic HTTPS.'
+    technology 'AWS App Runner + Docker'
+    style {
+      icon aws:fargate
+    }
+
+    frontend = component 'Browser UI' {
+      description 'Mobile-first voice interface. Captures mic audio, renders transcription, uploads photos.'
+      technology 'HTML5 Web Audio + Socket.IO'
+      style {
+        shape browser
+        color sky
+      }
+    }
+
+    server = component 'Node.js Server' {
+      description 'Express + Socket.IO. Bridges browser audio to Nova Sonic and executes AI tool calls.'
+      technology 'Node.js + TypeScript'
+      style {
+        icon tech:nodejs
+      }
+    }
+
+    // Internal relationship
+    frontend -> server 'WebSocket: streams audio & text'
+  }
+
+  // ── Amazon Bedrock (AI Layer) ──
+  bedrock = platform 'Amazon Bedrock' {
+    description 'Foundation models for voice, vision, and retrieval.'
+    style {
+      color indigo
+    }
+
+    novaSonic = component 'Nova 2 Sonic' {
+      description 'Speech-to-speech model. Bidirectional streaming, transcription, tool calling, spoken responses.'
+      technology 'amazon.nova-2-sonic-v1:0'
+      style {
+        color indigo
+      }
+    }
+
+    novaLite = component 'Nova Lite' {
+      description 'Multimodal model for analyzing uploaded photos.'
+      technology 'amazon.nova-lite-v1:0'
+      style {
+        color indigo
+      }
+    }
+
+    knowledgeBase = component 'Knowledge Base' {
+      description 'Managed RAG over operating procedures.'
+      technology 'Bedrock Knowledge Bases'
+      style {
+        color indigo
+      }
+    }
+
+    titan = component 'Titan Embeddings' {
+      description 'Generates vector embeddings for the knowledge base documents.'
+      technology 'amazon.titan-embed-text-v2'
+      style {
+        color indigo
+      }
+    }
+
+    // Internal relationship
+    knowledgeBase -> titan 'embeds documents'
+  }
+
+  // ── Data Layer ──
+  data = platform 'Data Layer' {
+    description 'Storage and vector search.'
+
+    openSearch = storage 'OpenSearch Serverless' {
+      description 'Vector store backing the knowledge base.'
+      technology 'Amazon OpenSearch Serverless'
+      style {
+        shape cylinder
+        color sky
+      }
+    }
+
+    s3Kb = storage 'S3 - KB Documents' {
+      description 'Source procedure documents for the knowledge base.'
+      style {
+        icon aws:simple-storage-service
+      }
+    }
+
+    s3Photos = storage 'S3 - Photo Uploads' {
+      description 'Stores photos uploaded by workers for analysis.'
+      style {
+        icon aws:simple-storage-service
+      }
+    }
+  }
+
+  // ── Integrations (CRM + Contact Center) ──
+  integrations = platform 'Integrations' {
+    description 'CRM and contact-center systems. Optional — the app runs in demo mode without them.'
+
+    crmLambda = function 'CRM Lambda' {
+      description 'Looks up contacts and creates support cases in the CRM.'
+      technology 'AWS Lambda'
+      style {
+        icon aws:lambda
+      }
+    }
+
+    connectLambda = function 'Connect Callback Lambda' {
+      description 'Places an outbound call via Amazon Connect to reach a supervisor.'
+      technology 'AWS Lambda (SDK v3)'
+      style {
+        icon aws:lambda
+      }
+    }
+
+    amazonConnect = component 'Amazon Connect' {
+      description 'Cloud contact center. Runs an outbound contact flow to call the worker.'
+      style {
+        icon aws:connect
+      }
+    }
+
+    sns = component 'Amazon SNS' {
+      description 'Publishes escalation notifications to supervisors.'
+      style {
+        icon aws:simple-notification-service
+      }
+    }
+
+    crm = component 'CRM System' {
+      description 'External CRM (e.g. Salesforce) reached via the CRM Lambda.'
+      technology 'Salesforce / other'
+      style {
+        color muted
+      }
+    }
+
+    // Internal relationships
+    crmLambda -> crm 'create case / phone lookup'
+    connectLambda -> amazonConnect 'StartOutboundVoiceContact'
+  }
+
+  // ── Security ──
+  cognito = service 'Amazon Cognito' {
+    description 'Authenticates frontline workers.'
+    style {
+      icon aws:cognito
+    }
+  }
+
+  // ── Container Registry ──
+  ecr = service 'Amazon ECR' {
+    description 'Stores the web app Docker image deployed by App Runner.'
+    style {
+      icon aws:elastic-container-registry
+    }
+  }
+
+  // ════════════════════════════════════════
+  //  CROSS-SYSTEM RELATIONSHIPS (root level)
+  // ════════════════════════════════════════
+
+  worker -> webapp.frontend 'speaks, types, uploads photos'
+  webapp.frontend -> cognito 'authenticates'
+
+  webapp.server -> bedrock.novaSonic 'bidirectional audio stream'
+  webapp.server -> bedrock.novaLite 'analyzes uploaded photo'
+  webapp.server -> bedrock.knowledgeBase 'search_knowledge_base (Retrieve)'
+
+  webapp.server -> data.s3Photos 'stores & reads photos'
+  webapp.server -> integrations.crmLambda 'lookup_contact / create_ticket'
+  webapp.server -> integrations.connectLambda 'escalate_call'
+  webapp.server -> integrations.sns 'escalation notification'
+
+  bedrock.knowledgeBase -> data.openSearch 'vector search'
+  data.s3Kb -> bedrock.knowledgeBase 'ingested into'
+
+  integrations.amazonConnect -> supervisor 'outbound call'
+
+  ecr -> webapp 'provides container image'
+}
+
+views {
+  // ── Landscape: everything at a glance (platforms collapsed) ──
+  view index {
+    title 'Voice AI Assistant — Landscape'
+    include *
+    autoLayout LeftRight
+  }
+
+  // ── Complete architecture: all services expanded inside their boundaries ──
+  view fullArchitecture {
+    title 'Voice AI Assistant — Complete Architecture'
+    include *
+    include webapp.**
+    include bedrock.**
+    include data.**
+    include integrations.**
+    autoLayout TopBottom
+  }
+
+  // ── Web app internals ──
+  view webappDetail of webapp {
+    title 'Web Application — Internals'
+    include *
+    include worker, bedrock.novaSonic
+  }
+
+  // ── Bedrock / AI layer ──
+  view bedrockDetail of bedrock {
+    title 'Amazon Bedrock — AI Layer'
+    include *
+    include data.openSearch, data.s3Kb
+  }
+
+  // ── Integrations ──
+  view integrationsDetail of integrations {
+    title 'Integrations — CRM & Contact Center'
+    include *
+    include webapp.server, supervisor
+  }
+
+  // ── Dynamic: voice conversation with knowledge base ──
+  dynamic view voiceFlow {
+    title 'Flow — Voice Query with Knowledge Base'
+    worker -> webapp.frontend 'speaks a question'
+    webapp.frontend -> webapp.server 'streams audio over WebSocket'
+    webapp.server -> bedrock.novaSonic 'forwards audio'
+    bedrock.novaSonic -> webapp.server 'tool use: search_knowledge_base'
+    webapp.server -> bedrock.knowledgeBase 'Retrieve query'
+    bedrock.knowledgeBase -> data.openSearch 'vector search'
+    webapp.server -> bedrock.novaSonic 'returns tool result'
+    bedrock.novaSonic -> webapp.server 'spoken answer (audio)'
+    webapp.server -> webapp.frontend 'streams audio back'
+    webapp.frontend -> worker 'plays voice response'
+  }
+
+  // ── Dynamic: photo analysis ──
+  dynamic view photoFlow {
+    title 'Flow — Photo Analysis'
+    worker -> webapp.frontend 'uploads a photo'
+    webapp.frontend -> webapp.server 'requests presigned URL'
+    webapp.frontend -> data.s3Photos 'uploads photo to S3'
+    webapp.server -> data.s3Photos 'reads photo'
+    webapp.server -> bedrock.novaLite 'analyzes image'
+    bedrock.novaLite -> webapp.server 'returns description'
+    webapp.server -> bedrock.novaSonic 'injects description as context'
+    bedrock.novaSonic -> webapp.frontend 'reads analysis aloud'
+  }
+
+  // ── Dynamic: create ticket ──
+  dynamic view ticketFlow {
+    title 'Flow — Create CRM Ticket'
+    worker -> bedrock.novaSonic 'asks to log a case'
+    bedrock.novaSonic -> webapp.server 'tool use: lookup_contact'
+    webapp.server -> integrations.crmLambda 'phone lookup'
+    integrations.crmLambda -> integrations.crm 'find contact'
+    bedrock.novaSonic -> webapp.server 'tool use: create_ticket'
+    webapp.server -> integrations.crmLambda 'create case'
+    integrations.crmLambda -> integrations.crm 'new Case'
+    bedrock.novaSonic -> worker 'confirms ticket created'
+  }
+
+  // ── Dynamic: escalation ──
+  dynamic view escalationFlow {
+    title 'Flow — Escalate to Supervisor'
+    worker -> bedrock.novaSonic 'asks to talk to a supervisor'
+    bedrock.novaSonic -> webapp.server 'tool use: escalate_call'
+    webapp.server -> integrations.sns 'publish notification'
+    webapp.server -> integrations.connectLambda 'initiate callback'
+    integrations.connectLambda -> integrations.amazonConnect 'StartOutboundVoiceContact'
+    integrations.amazonConnect -> supervisor 'outbound call'
+    bedrock.novaSonic -> worker 'confirms a supervisor will call'
+  }
+}

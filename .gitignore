@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+deploy.env
+scripts/deploy.env
+*.pem
+*.key
+aws-credentials*
+credentials.json
+
+# Build output
+dist/
+build/
+**/dist/
+cdk.out/
+**/cdk.out/
+*.tsbuildinfo
+
+# Docker
+.docker/
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Temp / generated artifacts
+/tmp/
+*.zip
+*.tmp
+
+# AWS CDK
+.cdk.staging/
+
+# Local config that may contain account-specific values
+**/local-config.json
+deployment-output.json
