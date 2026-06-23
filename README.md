@@ -41,30 +41,6 @@ Everything happens in one continuous voice conversation. Works in **demo mode ou
 ![Architecture Overview](docs/architecture/images/architecture-overview.png)
 *Complete AWS architecture — voice/photo/text from a phone browser flows through App Runner, Amazon Nova 2 Sonic, a Bedrock Knowledge Base, and pluggable CRM / Amazon Connect integrations.*
 
-```
-                          ┌──────────────────────────┐
-   Worker (phone) ───────▶│   Web App (App Runner)    │
-   voice + photo + text   │   Node.js + Socket.IO     │
-                          └────────────┬──────────────┘
-                                       │ bidirectional stream
-                                       ▼
-                          ┌──────────────────────────┐
-                          │   Amazon Nova 2 Sonic     │
-                          │  (speech-to-speech +      │
-                          │   tool calling)           │
-                          └────────────┬──────────────┘
-                                       │ tool calls
-          ┌────────────────────────────┼────────────────────────────┐
-          ▼                ▼                       ▼                  ▼
- ┌────────────────┐ ┌──────────────┐    ┌──────────────────┐ ┌──────────────┐
- │search_knowledge│ │lookup_contact│    │  create_ticket   │ │escalate_call │
- │_base (Bedrock  │ │  (CRM)       │    │     (CRM)        │ │Amazon Connect│
- │KB + OpenSearch)│ └──────────────┘    └──────────────────┘ └──────────────┘
- └────────────────┘
-
- Photo upload ─▶ S3 ─▶ Nova Lite (multimodal) ─▶ description ─▶ Nova Sonic reads it aloud
-```
-
 More diagrams (per-layer detail and step-by-step flows) live in [`docs/architecture/`](docs/architecture/).
 
 ---
@@ -177,15 +153,198 @@ Things that cost hours and aren't obvious from the docs:
 
 ---
 
-## Deploy to AWS
+## Deploy to AWS — Step-by-Step Setup Guide
 
-See `scripts/` for parameterized deployment helpers:
+This section walks you through everything you need to configure in AWS to get the assistant running in the cloud. The app runs locally in demo mode with minimal setup, but a full deployment requires the following manual steps.
 
-1. Create an OpenSearch Serverless collection + vector index (`create-opensearch-index.py`)
-2. Create the Bedrock Knowledge Base and sync your docs (`create-knowledge-base.sh`)
-3. Build, push, and deploy the web app to App Runner (`deploy-apprunner.sh`)
+### Prerequisites
 
-Copy `scripts/deploy.env.template` to `scripts/deploy.env` and fill in your values first.
+- AWS Account with admin access
+- AWS CLI v2 configured (`aws configure`)
+- Node.js 18+ and npm
+- Docker (for App Runner deployment)
+- Region: `us-east-1` recommended (full model availability)
+
+---
+
+### Step 1: Enable Model Access in Bedrock (Console)
+
+Nova 2 Sonic and Nova Lite are not enabled by default. You must request access:
+
+1. Open the **Amazon Bedrock** console → **Model access** (left menu)
+2. Click **Manage model access**
+3. Enable:
+   - `Amazon Nova 2 Sonic` (speech-to-speech)
+   - `Amazon Nova Lite` (multimodal, for photo analysis)
+   - `Amazon Titan Embed Text v2` (for Knowledge Base embeddings)
+4. Wait for access to be granted (usually instant for Amazon models)
+
+**Why manual:** AWS requires explicit opt-in for foundation models. This cannot be automated via CLI.
+
+---
+
+### Step 2: Create an S3 Bucket for Knowledge Base Documents
+
+```bash
+aws s3 mb s3://YOUR-KB-BUCKET-NAME --region us-east-1
+```
+
+Then upload your procedure documents:
+
+```bash
+aws s3 sync kb-content/ s3://YOUR-KB-BUCKET-NAME/procedures/
+```
+
+Replace the sample documents in `kb-content/` with your own procedures first.
+
+---
+
+### Step 3: Create OpenSearch Serverless Collection (Console + Script)
+
+The Knowledge Base needs a vector store. OpenSearch Serverless provides this.
+
+**In the AWS Console:**
+
+1. Open **Amazon OpenSearch Service** → **Serverless** → **Collections**
+2. Click **Create collection**:
+   - Name: `voice-assistant-kb`
+   - Type: **Vector search**
+3. For **Encryption**: use AWS owned key
+4. For **Network**: Public access (simplest for dev)
+5. For **Data access policy**: create a policy that grants access to your IAM user/role AND the KB role (you'll create the KB role next)
+
+**After the collection is Active**, create the vector index:
+
+Go to the **Indexes** tab → **Create index**:
+- Index name: `voice-assistant-index`
+- Vector field: name=`embedding`, engine=`faiss`, dimensions=`1024`, distance=`Euclidean`
+- Metadata fields: `text` (String, filterable), `metadata` (String, filterable)
+
+**Why manual:** OpenSearch Serverless collections require encryption/network/access policies that are tightly coupled. The console wizard handles the dependencies. The vector index can alternatively be created via the script in `scripts/create-opensearch-index.py`.
+
+---
+
+### Step 4: Create the IAM Role for the Knowledge Base
+
+The Knowledge Base needs a role that allows Bedrock to access S3 and OpenSearch:
+
+```bash
+# Create the role
+aws iam create-role \
+  --role-name voice-assistant-kb-role \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "bedrock.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+# Attach permissions (replace YOUR-BUCKET and YOUR-ACCOUNT-ID)
+aws iam put-role-policy \
+  --role-name voice-assistant-kb-role \
+  --policy-name KBPermissions \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {"Effect": "Allow", "Action": "bedrock:InvokeModel", "Resource": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0"},
+      {"Effect": "Allow", "Action": ["s3:GetObject", "s3:ListBucket"], "Resource": ["arn:aws:s3:::YOUR-BUCKET", "arn:aws:s3:::YOUR-BUCKET/*"]},
+      {"Effect": "Allow", "Action": "aoss:APIAccessAll", "Resource": "*"}
+    ]
+  }'
+```
+
+---
+
+### Step 5: Create the Knowledge Base (Script)
+
+Once OpenSearch and the role exist, use the provided script:
+
+```bash
+cd scripts
+cp deploy.env.template deploy.env
+# Edit deploy.env with your values (account ID, bucket, collection ARN, etc.)
+source deploy.env
+bash create-knowledge-base.sh
+```
+
+This creates the KB, adds the S3 data source, and runs the first sync. Note the **Knowledge Base ID** from the output — you'll need it for the `.env`.
+
+---
+
+### Step 6: Create an S3 Bucket for Photo Uploads (Optional)
+
+If you want photo analysis:
+
+```bash
+aws s3 mb s3://YOUR-PHOTOS-BUCKET --region us-east-1
+```
+
+Configure CORS on the bucket to allow browser uploads:
+
+```bash
+aws s3api put-bucket-cors --bucket YOUR-PHOTOS-BUCKET --cors-configuration '{
+  "CORSRules": [{
+    "AllowedOrigins": ["*"],
+    "AllowedMethods": ["PUT", "GET"],
+    "AllowedHeaders": ["*"],
+    "MaxAgeSeconds": 3600
+  }]
+}'
+```
+
+---
+
+### Step 7: Deploy the Web App to AWS App Runner (Script)
+
+```bash
+source deploy.env
+bash deploy-apprunner.sh
+```
+
+This builds the Docker image, pushes to ECR, and gives you instructions for creating the App Runner service. You'll need to:
+
+1. Create IAM roles for App Runner (ECR access + instance role with Bedrock/S3/Lambda permissions)
+2. Create the App Runner service in the console or CLI pointing to the ECR image, port 3000
+3. Set the environment variables (Knowledge Base ID, bucket names, optional Lambda ARNs)
+
+The service gives you an HTTPS URL like `https://xxxxx.awsapprunner.com` — accessible from any phone browser.
+
+---
+
+### Step 8: (Optional) CRM Integration
+
+To connect to a CRM like Salesforce:
+
+1. Deploy a Lambda that interfaces with your CRM (the repo expects a Salesforce CTI Adapter-style Lambda that accepts `{ Details: { Parameters: { sf_operation, ... } } }`)
+2. Set `CRM_LAMBDA_ARN` in the App Runner environment variables
+3. Without this, the app runs in demo mode (tools return mock responses)
+
+---
+
+### Step 9: (Optional) Amazon Connect Escalation
+
+To enable real phone callbacks to supervisors:
+
+1. You need an existing Amazon Connect instance with a contact flow for outbound calls
+2. Deploy the Lambda in `lambda/connect-callback/` with environment variables for your Connect instance (CONTACT_FLOW_ID, INSTANCE_ID, QUEUE_ID, SOURCE_PHONE_NUMBER)
+3. Set `CONNECT_CALLBACK_LAMBDA_ARN` in the App Runner environment variables
+4. Without this, escalation runs in demo mode
+
+---
+
+### What You Get at Each Stage
+
+| After Step... | What works |
+|---|---|
+| Steps 1-5 | `npm run dev` locally with voice + KB search |
+| Step 6 | Photo upload and analysis |
+| Step 7 | Full app running in the cloud, accessible from phones |
+| Step 8 | CRM ticket creation with real contact lookup |
+| Step 9 | Outbound phone calls to supervisors |
+
+You can stop at any step and have a working assistant — each integration is additive.
 
 ---
 
